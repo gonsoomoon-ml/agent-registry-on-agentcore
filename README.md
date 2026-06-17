@@ -16,6 +16,44 @@
 
 ---
 
+## ⚡ 한눈에 보기 — 라이브 실행 결과
+
+실제 AWS 계정에서 직접 실행한 출력 (식별자는 일회성, 전부 정리됨).
+
+**ⓐ Registry — 수명주기** · `test_agentcore_registry.py` · `us-west-2` · 자가 정리
+
+```
+[create    ] registryId=Y8E7cox5oSEEykNn
+[ready     ] status=READY
+[publish   ] A2A agent accepted (AgentCard schema-validated)
+[lifecycle ] start      -> DRAFT
+[lifecycle ] submitted  -> PENDING_APPROVAL
+[lifecycle ] approved   -> APPROVED
+[lifecycle ] deprecated -> DEPRECATED
+[search    ] 'customer churn prediction' -> no hits yet (semantic index is eventually consistent)
+[cleanup   ] records + registry deleted
+[done      ] Agent Registry + A2A concept VALIDATED; all resources torn down
+```
+
+**ⓑ Runtime — Harness 에이전트** · `client.py` · `us-east-1` · Sonnet 4.6
+
+```
+[discover  ] agent=churn-predictor  tool=customer_db_search
+[tool      ] customer_db_search({'customer_id': 'C-1001'})
+             -> {orders_last_90d: 1, avg_review_score: 2.3, late_shipments: 2, days_since_last_order: 74}
+=== RESULT ===
+{"customer_id": "C-1001", "churn_risk": "high", "score": 0.95, "reasons": [ ...4 signals... ]}
+```
+
+| 입력 | mockup 신호 | 에이전트 판단 |
+|---|---|---|
+| `C-1001` | 4/4 (74일 미주문·리뷰 2.3·지연 2·주문 1) | `churn_risk: high` · `0.95` |
+| `C-2002` | 0/4 (활발·만족) | `churn_risk: low` · `0.05` |
+
+> 상세: 레지스트리 검증 → §3, Harness 런타임 흐름 → §6.
+
+---
+
 ## 1. 아키텍처 — 발견(control plane) → 실행(data plane)
 
 ```
