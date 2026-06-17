@@ -16,6 +16,9 @@ credentials
 # Local Claude Code settings
 .claude/
 
+# Runtime state written by register.py (contains live ARNs) — not for the repo
+.agentcore_state.json
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

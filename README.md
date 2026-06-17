@@ -8,9 +8,11 @@
 > **ⓑ A2A 런타임**(레지스트리에서 발견한 에이전트를 안전하게 호출·위임 = data plane).
 > 이 repo는 그 가설이 AgentCore의 실 API로 성립함을 라이브로 입증한다.
 
-- Region: `us-west-2` · boto3 `1.43.25`
-- 검증 일자: 2026-06-17
-- 비용: 레지스트리는 메타데이터 카탈로그 — 사실상 $0, 테스트는 생성 즉시 전량 삭제
+- 검증 일자: 2026-06-17 · boto3 `1.43.25`
+- 두 부분으로 구성:
+  - **개념 검증** — `test_agentcore_registry.py` : 레지스트리 수명주기 (region `us-west-2`, 자가 정리) — §2~5
+  - **워킹 데모** — `agents_and_tools.py` / `register.py` / `client.py` : AgentCore **Harness** 에이전트가 도구를 호출해 실제 결과 반환 (region `us-east-1`) — §6
+- 비용: 레지스트리·Harness는 메타데이터/설정 — 유휴 시 ~$0. 데모 호출 시에만 소액 LLM 토큰.
 
 ---
 
@@ -162,18 +164,86 @@ python3 test_agentcore_registry.py
 
 ---
 
-## 6. 파일 구성
+## 6. 워킹 데모 — AgentCore Harness 에이전트 (발견 → 호출 → 결과)
+
+§1의 "discover → execute"를 **실제로 동작**시킨다. 에이전트는 컨테이너 없는 관리형 런타임인
+**AgentCore Harness**(Sonnet 4.6)로 만들고, 도구는 `inline_function`으로 선언해 **클라이언트가 로컬 실행**한다.
+도메인은 고객 이탈(churn) 예측 — 에이전트가 도구를 호출해 이력을 받고 위험도를 판단한다.
+
+```
+agents_and_tools.py  →  register.py  →  client.py
+   (1) 정의              (2) 등록          (3) 발견 → 호출 → 결과
+
+   user: "Assess churn risk for C-1001"
+      │
+      ▼  client.py: .agentcore_state.json 읽기 → GetRegistryRecord → harnessArn 추출
+┌─ DISCOVER ─ registry ─────────────────────────────────────────
+│  agent record → harnessArn (런타임 위치)
+│  tool record  → customer_db_search (inline_function 스펙)
+└───────────────────────────────────────────────────────────────
+      │
+      ▼  InvokeHarness(harnessArn, messages)
+┌─ AGENT ─ AgentCore Harness (관리형, Sonnet 4.6) ──────────────
+│  systemPrompt 루브릭으로 추론 → tool_use emit
+└───────────────────────────────────────────────────────────────
+      │  stopReason = tool_use
+      ▼  client가 도구를 '로컬' 실행 (inline_function)
+┌─ TOOL ─ customer_db_search("C-1001")  [client-side] ──────────
+│  → {orders_last_90d:1, avg_review_score:2.3, late_shipments:2, days_since_last_order:74}
+└───────────────────────────────────────────────────────────────
+      │  toolResult → InvokeHarness (다음 턴)
+      ▼
+   RESULT: {"churn_risk":"high","score":0.95,"reasons":[...]}
+```
+
+**핵심:** 에이전트(Harness)는 **AWS에서 Sonnet 4.6로 추론**하고, 도구는 **우리 프로세스에서 실행**된다.
+`inline_function`은 모델이 `tool_use`를 스트림으로 내보내면 클라이언트가 실행해 `toolResult`를 회신하는 구조다.
+
+### 실행
+
+```bash
+# region us-east-1 · AgentCoreHarnessRole · Sonnet 4.6 inference profile 사용
+python3 register.py            # Harness + 레지스트리 + 레코드 생성, .agentcore_state.json 기록
+python3 client.py C-1001       # 발견 → 호출 → 결과
+python3 client.py C-2002       # 다른 고객
+python3 client.py --cleanup    # Harness + 레지스트리 + 레코드 전량 삭제
+```
+
+### 라이브 결과 (검증됨)
+
+| 입력 | mockup 신호 | 에이전트 판단 |
+|---|---|---|
+| `C-1001` | 4개 전부 (74일 미주문·리뷰 2.3·지연 2·주문 1) | `churn_risk: high` · `score 0.95` |
+| `C-2002` | 0개 (활발·만족) | `churn_risk: low` · `score 0.05` |
+
+동일한 에이전트·도구·레지스트리가 입력에 따라 정확히 다른 판단을 내린다.
+
+### 라이브에서 얻은 함정 3가지 (소스에 반영됨)
+
+- `harnessName`은 `[a-zA-Z][a-zA-Z0-9_]{0,39}` — **하이픈 불가**, 언더스코어만.
+- `anthropic.claude-sonnet-4-6`는 on-demand 미지원 → **`us.` cross-region inference profile** 필요
+  (`us.anthropic.claude-sonnet-4-6`). 목록(`list_inference_profiles`)엔 안 떠도 호출 가능.
+- Harness `toolResult` content는 `json` 구조 타입을 거부 → **`text`(JSON 문자열)** 로 회신.
+
+> 비즈니스 로직(이탈 루브릭)은 `agents_and_tools.py`의 `SYSTEM_PROMPT`에 있다 — 가중치·임계값을 바꾸면 판단이 바뀐다.
+
+---
+
+## 7. 파일 구성
 
 ```
 agent-registry-on-agentcore/
-├── README.md                          # 본 문서: 아키텍처 + 라이브 검증 결과 + 학습
-├── test_agentcore_registry.py         # ⓐ Agent Registry 수명주기 라이브 테스트 (자가 정리)
+├── README.md                          # 본 문서: 아키텍처 + 라이브 검증 + 워킹 데모
+├── test_agentcore_registry.py         # 개념 검증: Registry 수명주기 (자가 정리, us-west-2)
+├── agents_and_tools.py                # 데모(1): 도구 구현(mockup) + 에이전트 정의(model·prompt·tool)
+├── register.py                        # 데모(2): Harness 생성 + 레지스트리 등록 → .agentcore_state.json
+├── client.py                          # 데모(3): 발견 → InvokeHarness 루프(도구 로컬) → 결과 / --cleanup
 └── docs/
-    ├── agentcore-api-inventory.md     # Registry/Runtime/Gateway/A2A 전체 API 인벤토리(read-only)
+    ├── agentcore-api-inventory.md     # Registry/Runtime/Gateway/A2A/Harness API 인벤토리(read-only)
     └── agent-gateway-vs-registry.md   # 업계 개념 정리: Gateway(런타임) vs Registry(카탈로그)
 ```
 
-## 7. 핵심 결론
+## 8. 핵심 결론
 
 **"에이전트 계층 = Agent Registry + A2A 런타임"은 AgentCore에서 가공 개념이 아니라 실제 API 표면으로 존재한다.**
 하나의 레지스트리가 A2A 에이전트(스키마 검증)와 도구를 공동 카탈로그하고,
