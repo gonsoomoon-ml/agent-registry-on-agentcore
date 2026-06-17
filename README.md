@@ -99,14 +99,14 @@
 
 ## 3. 라이브 검증 결과 (ⓐ Agent Registry)
 
-| 검증 항목 | 결과 | 증거 / 사용 API |
-|---|---|---|
-| 레지스트리 생성 | ✅ `READY`(~70초) | `CreateRegistry(approvalConfiguration.autoApproval=False)` |
-| **ⓑ A2A 레코드 (스키마 검증)** | ✅ | `descriptorType=A2A`, `descriptors.a2a.agentCard` — **잘못된 카드는 `does not match any supported version`으로 거부**, 유효한 A2A v0.3.0 카드만 수락 |
-| 도구 레코드(한 레지스트리 공동 카탈로그) | ✅ | `descriptorType=CUSTOM` — 에이전트 + 도구가 같은 레지스트리에 공존 |
-| **① 퍼블리시/승인/폐기 수명주기** | ✅ enum 강제 | `DRAFT → PENDING_APPROVAL → APPROVED → DEPRECATED` + `SubmitRegistryRecordForApproval` / `UpdateRegistryRecordStatus` |
-| **⑤ 접근 제어** | ✅ | `CreateRegistry(authorizerType = AWS_IAM \| CUSTOM_JWT)` |
-| **② 시맨틱 디스커버리** | ⚠️ 존재하나 지연 | `SearchRegistryRecords` 작동, 단 신규/DRAFT는 즉시 미색인 (eventual consistency) |
+| 무엇을 검증했나 | 결과 | 핵심 API | 근거 / 메모 |
+|---|---|---|---|
+| 레지스트리를 생성하고 READY까지 대기 | ✅ ~70초 | `CreateRegistry` · `GetRegistry` | `approvalConfiguration.autoApproval=False` → 수동 승인 모드로 생성 |
+| ⓑ A2A 에이전트 레코드가 실제 스키마로 검증되는지 | ✅ 스키마 강제 | `CreateRegistryRecord(descriptorType=A2A)` | 잘못된 AgentCard는 `does not match any supported version`로 **거부**, 유효한 A2A v0.3.0만 수락 |
+| 한 레지스트리가 에이전트 + 도구를 함께 카탈로그하는지 | ✅ 공동 카탈로그 | `CreateRegistryRecord(descriptorType=CUSTOM)` | 에이전트 레코드와 도구 레코드가 같은 레지스트리에 공존 |
+| ① 퍼블리시 → 승인 → 폐기 수명주기를 API가 강제하는지 | ✅ enum 강제 | `SubmitRegistryRecordForApproval` · `UpdateRegistryRecordStatus` | 상태머신 `DRAFT → PENDING_APPROVAL → APPROVED → DEPRECATED` |
+| ⑤ 접근 제어(인증 모드)를 지정할 수 있는지 | ✅ 지원 | `CreateRegistry(authorizerType=…)` | `AWS_IAM` 또는 `CUSTOM_JWT` |
+| ② 시맨틱 디스커버리가 동작하는지 | ⚠️ 동작하나 색인 지연 | `SearchRegistryRecords` (data plane) | 신규/DRAFT 레코드는 즉시 미색인 — eventual consistency |
 
 ### 사용자 정의 "Agent Registry 5대 기능" ↔ 실제 AWS API
 
