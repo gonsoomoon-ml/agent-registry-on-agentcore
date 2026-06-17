@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""(3) Discover the agent + tool from the registry, then call the agent for a result.
+"""(3) 레지스트리에서 에이전트+도구를 찾아, 에이전트를 호출해 결과를 받는다.
 
-Reads STATE_FILE for the registry/record ids, RETRIEVES the agent's descriptor
-from the registry (-> harnessArn) and the tool's descriptor, then runs the
-InvokeHarness agent loop: the managed Harness (Sonnet 4.6) reasons and emits
-tool_use; this client executes the tool locally and feeds the result back, until
-the agent returns its final churn assessment.
+STATE_FILE에서 registry/record id를 읽고, 레지스트리에서 에이전트 디스크립터(-> harnessArn)와
+도구 디스크립터를 가져온 뒤, InvokeHarness 에이전트 루프를 돈다: 관리형 Harness(Sonnet 4.6)가
+추론하며 tool_use를 내보내면, 이 client가 도구를 로컬로 실행해 결과를 돌려주고, 에이전트가
+최종 이탈 판단을 낼 때까지 반복한다.
 
-    python3 client.py                 # discover + run (default customer C-1001)
-    python3 client.py C-2002          # a specific customer
-    python3 client.py --cleanup       # delete harness + registry + records
+    python3 client.py                 # 조회 + 실행 (기본 고객 C-1001)
+    python3 client.py C-2002          # 특정 고객
+    python3 client.py --cleanup       # harness + registry + records 삭제
 """
 from __future__ import annotations
 
@@ -43,15 +42,15 @@ def clients(region: str):
 
 
 def retrieve(ctl, registry_id: str, record_id: str) -> dict:
-    """Retrieve a record's descriptor payload FROM the registry (strong-consistent)."""
+    """레지스트리에서 레코드의 디스크립터 payload를 가져온다(강한 일관성)."""
     rec = ctl.get_registry_record(registryId=registry_id, recordId=record_id)
     return json.loads(rec["descriptors"]["custom"]["inlineContent"])
 
 
-# --- the agent loop over the InvokeHarness Converse-style event stream ---------
+# --- InvokeHarness Converse-style 이벤트 스트림 위에서 도는 에이전트 루프 ---------
 
 def parse_stream(stream) -> tuple[list, list, str | None]:
-    """Collapse the event stream into (assistant_content, tool_uses, stop_reason)."""
+    """이벤트 스트림을 (assistant_content, tool_uses, stop_reason)으로 접는다."""
     blocks: dict[int, dict] = {}
     order: list[int] = []
     stop = None
@@ -87,7 +86,12 @@ def parse_stream(stream) -> tuple[list, list, str | None]:
         if b["kind"] == "text" and b.get("text"):
             content.append({"text": b["text"]})
         elif b["kind"] == "toolUse":
-            args = json.loads(b["input"] or "{}")
+            try:
+                args = json.loads(b["input"] or "{}")
+            except json.JSONDecodeError:
+                # 모델이 깨진/불완전한 JSON을 스트리밍한 경우 — 빈 입력으로 넘겨
+                # 도구가 error를 돌려주게 하고, 루프가 복구하도록 둔다(크래시 대신).
+                args = {}
             content.append({"toolUse": {"name": b["name"], "toolUseId": b["id"],
                                         "input": args, "type": "tool_use"}})
             tool_uses.append({"name": b["name"], "toolUseId": b["id"], "input": args})
@@ -95,6 +99,7 @@ def parse_stream(stream) -> tuple[list, list, str | None]:
 
 
 def run_agent(dp, harness_arn: str, user_text: str) -> str:
+    """Harness를 호출하고, tool_use가 나오면 도구를 로컬 실행해 결과를 회신하는 루프."""
     session = f"churn-{uuid.uuid4().hex}"
     messages = [{"role": "user", "content": [{"text": user_text}]}]
     for _ in range(MAX_TURNS):
@@ -105,7 +110,7 @@ def run_agent(dp, harness_arn: str, user_text: str) -> str:
         if stop == "tool_use" and tool_uses:
             results = []
             for tu in tool_uses:
-                out = at.dispatch_tool(tu["name"], tu["input"])           # <- client executes the tool
+                out = at.dispatch_tool(tu["name"], tu["input"])           # client가 도구를 로컬 실행
                 log("tool", f"{tu['name']}({tu['input']}) -> {out}")
                 results.append({"toolResult": {"toolUseId": tu["toolUseId"],
                                                "content": [{"text": json.dumps(out)}], "status": "success"}})
@@ -115,32 +120,47 @@ def run_agent(dp, harness_arn: str, user_text: str) -> str:
     return "(max turns reached without a final answer)"
 
 
-def cleanup() -> int:
-    state = load_state()
-    ctl, _ = clients(state["region"])
-    for key in ("agentRecordId", "toolRecordId"):
-        try:
-            ctl.delete_registry_record(registryId=state["registryId"], recordId=state[key])
-            log("cleanup", f"record {state[key]} deleted")
-        except ClientError as e:
-            log("cleanup", f"record {state[key]}: {e.response['Error']['Code']}")
-    deadline = time.monotonic() + 120
+def _delete_with_retry(call, what: str, timeout: int = 120) -> None:
+    """삭제를 시도하되 ConflictException(아직 CREATING이거나 비동기 삭제 중)이면 시한까지 재시도한다."""
+    deadline = time.monotonic() + timeout
     while True:
         try:
-            ctl.delete_registry(registryId=state["registryId"])
-            log("cleanup", "registry deleted")
-            break
+            call()
+            log("cleanup", f"{what} deleted")
+            return
         except ClientError as e:
-            if e.response["Error"]["Code"] == "ConflictException" and time.monotonic() < deadline:
+            code = e.response["Error"]["Code"]
+            if code == "ResourceNotFoundException":
+                return  # 이미 없음 — 정상
+            if code == "ConflictException" and time.monotonic() < deadline:
                 time.sleep(5)
                 continue
-            log("cleanup", f"registry: {e.response['Error']['Code']}")
-            break
+            log("cleanup", f"{what}: {code}")
+            return
+
+
+def cleanup() -> int:
     try:
-        ctl.delete_harness(harnessId=state["harnessId"])
-        log("cleanup", "harness deleted")
-    except ClientError as e:
-        log("cleanup", f"harness: {e.response['Error']['Code']}")
+        state = load_state()
+    except FileNotFoundError:
+        log("cleanup", f"{STATE_FILE} 없음 — 정리할 리소스가 없다.")
+        return 0
+    ctl, _ = clients(state["region"])
+    # 레코드 먼저, 그다음 레지스트리, 마지막으로 harness. 모두 충돌 시 재시도한다.
+    for key in ("agentRecordId", "toolRecordId"):
+        rid = state.get(key)
+        if rid:
+            _delete_with_retry(
+                lambda rid=rid: ctl.delete_registry_record(registryId=state["registryId"], recordId=rid),
+                f"record {rid}")
+    if state.get("registryId"):
+        _delete_with_retry(
+            lambda: ctl.delete_registry(registryId=state["registryId"]),
+            f"registry {state['registryId']}")
+    if state.get("harnessId"):
+        _delete_with_retry(
+            lambda: ctl.delete_harness(harnessId=state["harnessId"]),
+            f"harness {state['harnessId']}")
     try:
         os.remove(STATE_FILE)
     except OSError:
@@ -155,14 +175,14 @@ def main() -> int:
     try:
         state = load_state()
     except FileNotFoundError:
-        log("error", f"{STATE_FILE} not found — run `python3 register.py` first")
+        log("error", f"{STATE_FILE} 없음 — 먼저 `python3 register.py`를 실행할 것")
         return 1
     ctl, dp = clients(state["region"])
     try:
-        agent = retrieve(ctl, state["registryId"], state["agentRecordId"])     # (3) discover agent
-        tool = retrieve(ctl, state["registryId"], state["toolRecordId"])       #     discover tool
+        agent = retrieve(ctl, state["registryId"], state["agentRecordId"])     # (3) 에이전트 조회
+        tool = retrieve(ctl, state["registryId"], state["toolRecordId"])       #     도구 조회
         log("discover", f"agent={agent['agentName']}  tool={tool['name']}  harness=...{agent['harnessArn'][-20:]}")
-        answer = run_agent(dp, agent["harnessArn"], f"Assess churn risk for customer {customer}.")  # (3) call
+        answer = run_agent(dp, agent["harnessArn"], f"Assess churn risk for customer {customer}.")  # (3) 호출
         print("\n=== RESULT ===")
         print(answer)
         return 0
