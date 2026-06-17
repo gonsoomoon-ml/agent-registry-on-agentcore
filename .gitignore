@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# AWS credentials / secrets — never commit
+.aws/
+credentials
+*.pem
+*.key
+.env
+.env.*
+
+# Local Claude Code settings
+.claude/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
