@@ -11,7 +11,7 @@
 - 검증 일자: 2026-06-17 · boto3 `1.43.25`
 - 두 부분으로 구성:
   - **개념 검증** — `test_agentcore_registry.py` : 레지스트리 수명주기 (region `us-west-2`, 자가 정리) — §2~5
-  - **워킹 데모** — `agents_and_tools.py` / `register.py` / `client.py` : AgentCore **Harness** 에이전트가 도구를 호출해 실제 결과 반환 (region `us-east-1`) — §6
+  - **워킹 데모** — `agents_and_tools.py` / `register.py` / `client.py` : 호출자가 런타임을 하드코딩하지 않고 **레지스트리에서 harnessArn을 받아** AgentCore **Harness**(Sonnet 4.6)를 호출 → 실제 결과 (region `us-east-1`) — §6
 - 비용: 레지스트리·Harness는 메타데이터/설정 — 유휴 시 ~$0. 데모 호출 시에만 소액 LLM 토큰.
 
 ---
@@ -164,21 +164,29 @@ python3 test_agentcore_registry.py
 
 ---
 
-## 6. 워킹 데모 — AgentCore Harness 에이전트 (발견 → 호출 → 결과)
+## 6. 워킹 데모 — 호출자는 런타임을 하드코딩하지 않는다 (레지스트리 간접화)
 
-§1의 "discover → execute"를 **실제로 동작**시킨다. 에이전트는 컨테이너 없는 관리형 런타임인
-**AgentCore Harness**(Sonnet 4.6)로 만들고, 도구는 `inline_function`으로 선언해 **클라이언트가 로컬 실행**한다.
-도메인은 고객 이탈(churn) 예측 — 에이전트가 도구를 호출해 이력을 받고 위험도를 판단한다.
+**핵심 메시지: 레지스트리는 *간접화(indirection)* 계층이다.** 호출자(`client.py`)는 에이전트의
+런타임을 코드에 박지 않는다 — 레지스트리에 "`churn-predictor`를 구현한 런타임이 뭐냐"고 물어
+**가리키는 harnessArn을 호출**한다. 레코드 뒤의 런타임을 갈아끼워도 호출자 코드는 그대로다.
+이것이 §1의 "discover → execute"이자, AI Gateway의 "단일 통제점 뒤에서 갈아끼우기"와 같은 가치다.
+
+> **정직한 범위.** 이 데모의 조회는 `.agentcore_state.json`에 적힌 **알려진 recordId로 `GetRegistryRecord`**
+> 하는 *lookup*이다(재현성을 위해). 레지스트리의 *진짜* 발견 기능 — 시맨틱 검색(§3 ②)과
+> 승인 게이트(§2 lifecycle) — 는 별도로 증명돼 있고, 여기서는 호출 경로를 단순·결정적으로 두었다.
+
+에이전트는 컨테이너 없는 관리형 런타임 **AgentCore Harness**(Sonnet 4.6)이고, 도구는
+`inline_function`으로 선언해 **클라이언트가 로컬 실행**한다. 도메인은 고객 이탈(churn) 예측.
 
 ```
 agents_and_tools.py  →  register.py  →  client.py
-   (1) 정의              (2) 등록          (3) 발견 → 호출 → 결과
+   (1) 정의              (2) 등록          (3) 조회 → 호출 → 결과
 
    user: "Assess churn risk for C-1001"
       │
-      ▼  client.py: .agentcore_state.json 읽기 → GetRegistryRecord → harnessArn 추출
-┌─ DISCOVER ─ registry ─────────────────────────────────────────
-│  agent record → harnessArn (런타임 위치)
+      ▼  client.py: .agentcore_state.json(recordId) → GetRegistryRecord
+┌─ RESOLVE ─ registry (간접화 지점) ────────────────────────────
+│  agent record → harnessArn   ← 호출자는 이 arn을 '하드코딩하지 않고' 레지스트리에서 받는다
 │  tool record  → customer_db_search (inline_function 스펙)
 └───────────────────────────────────────────────────────────────
       │
@@ -196,15 +204,21 @@ agents_and_tools.py  →  register.py  →  client.py
    RESULT: {"churn_risk":"high","score":0.95,"reasons":[...]}
 ```
 
-**핵심:** 에이전트(Harness)는 **AWS에서 Sonnet 4.6로 추론**하고, 도구는 **우리 프로세스에서 실행**된다.
-`inline_function`은 모델이 `tool_use`를 스트림으로 내보내면 클라이언트가 실행해 `toolResult`를 회신하는 구조다.
+**간접화의 산 증거 (디버깅 중 실제로 일어남).** 처음엔 잘못된 모델 id로 Harness를 만들었고,
+`UpdateHarness`로 모델을 `us.anthropic.claude-sonnet-4-6`로 **제자리 교체**했다. harnessArn(레코드가
+가리키는 값)은 그대로였기에 **`client.py`를 한 줄도 고치지 않고** 다시 동작했다 — 레지스트리가
+호출자와 런타임을 디커플링한다는 증거다.
+
+또 하나의 축: 에이전트(Harness)는 **AWS에서 Sonnet 4.6로 추론**하고 도구는 **우리 프로세스에서 실행**된다.
+`inline_function`은 모델이 `tool_use`를 내보내면 클라이언트가 실행해 `toolResult`를 회신하는 구조다 —
+관리형 추론과 클라이언트 측 도구가 신뢰경계를 나눠 가진다.
 
 ### 실행
 
 ```bash
 # region us-east-1 · AgentCoreHarnessRole · Sonnet 4.6 inference profile 사용
 python3 register.py            # Harness + 레지스트리 + 레코드 생성, .agentcore_state.json 기록
-python3 client.py C-1001       # 발견 → 호출 → 결과
+python3 client.py C-1001       # 조회(레지스트리) → 호출(Harness) → 결과
 python3 client.py C-2002       # 다른 고객
 python3 client.py --cleanup    # Harness + 레지스트리 + 레코드 전량 삭제
 ```
