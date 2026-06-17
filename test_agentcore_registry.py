@@ -117,6 +117,16 @@ class EphemeralRegistry:
         return self.ac.ctl.get_registry_record(
             registryId=self.registry_id, recordId=record_id).get("status")
 
+    def wait_record_ready(self, record_id: str, *, timeout: int = 120) -> str:
+        """A new record starts in CREATING and cannot be modified until it
+        settles to DRAFT. Poll until it leaves CREATING/UPDATING."""
+        deadline = time.monotonic() + timeout
+        status = self.get_status(record_id)
+        while status in ("CREATING", "UPDATING") and time.monotonic() < deadline:
+            time.sleep(POLL_S)
+            status = self.get_status(record_id)
+        return status
+
     def submit_for_approval(self, record_id: str) -> None:
         self.ac.ctl.submit_registry_record_for_approval(
             registryId=self.registry_id, recordId=record_id)
@@ -212,7 +222,7 @@ def publish_agent(reg: EphemeralRegistry, record_name: str) -> str:
 
 def run_lifecycle(reg: EphemeralRegistry, record_id: str) -> None:
     """① DRAFT → PENDING_APPROVAL → APPROVED → DEPRECATED."""
-    log("lifecycle", f"start      -> {reg.get_status(record_id)}")
+    log("lifecycle", f"start      -> {reg.wait_record_ready(record_id)}")  # wait out CREATING
     reg.submit_for_approval(record_id)
     log("lifecycle", f"submitted  -> {reg.get_status(record_id)}")
     reg.set_status(record_id, "APPROVED", "Validated by security review (test)")
